@@ -1,125 +1,108 @@
-import psycopg2
-import os
-from contextlib import contextmanager
-from dotenv import load_dotenv
+import streamlit as st
+from db import init_db as db  # Assuming the modularized code is in db_module.py
+import invoice_generator as invgen
 
-# --- 1. INFRASTRUCTURE & CONFIGURATION ---
+st.title("Welcome to Anubhav Trainings")
 
-def get_db_url():
-    """Loads and returns the DB_URL from environment variables."""
-    load_dotenv()
-    db_url = os.getenv("DB_URL")
-    if not db_url:
-        raise ValueError("❌ DB_URL not found in environment variables.")
-    return db_url
+# --- 1. SESSION STATE SETUP ---
+if "selected_courses" not in st.session_state:
+    st.session_state.selected_courses = []
 
-@contextmanager
-def get_db_connection():
-    """Context manager to handle database connection, commits, and cleanup."""
-    db_url = get_db_url()
-    conn = psycopg2.connect(db_url)
+# --- 2. DATABASE INITIALIZATION (CACHED) ---
+@st.cache_resource
+def initialize_application():
+    """Runs once to setup schema and seed initial data."""
     try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-# --- 2. GENERIC DATABASE UTILITIES ---
-
-def execute_ddl(query):
-    """Executes Data Definition Language (Table creation, etc.)."""
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query)
-
-def execute_dml(query, params=None):
-    """Executes Data Manipulation Language (Insert, Update, Delete)."""
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, params or ())
-
-def execute_query(query, params=None, fetch_all=False):
-    """Executes a query and returns one or all results."""
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, params or ())
-            return cur.fetchall() if fetch_all else cur.fetchone()
-
-# --- 3. SPECIFIC BUSINESS LOGIC ---
-
-def check_db_version():
-    """Logs the PostgreSQL version."""
-    version = execute_query('SELECT VERSION();')
-    if version:
-        print(f"✅ Connected to: {version[0]}")
-
-def setup_all_tables():
-    """Initializes schema for both Employee and Training tables."""
-    # Employee Table
-    employee_ddl = '''
-    CREATE TABLE IF NOT EXISTS employees (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(50) UNIQUE,
-        gender VARCHAR(20),
-        salary DECIMAL(10,2),
-        currency VARCHAR(4)
-    );'''
-    
-    # Training Table
-    training_ddl = '''
-    CREATE TABLE IF NOT EXISTS anubhav_training (
-        id SERIAL PRIMARY KEY,
-        course_name VARCHAR(50) UNIQUE,
-        trainer VARCHAR(100),
-        price INTEGER,
-        duration INTEGER
-    );'''
-    
-    execute_ddl(employee_ddl)
-    execute_ddl(training_ddl)
-    print("🚀 All tables initialized.")
-
-def seed_data(employees, training_data):
-    """Populates both tables using UPSERT logic."""
-    # Seed Employees
-    emp_sql = '''INSERT INTO employees (name, gender, salary, currency) 
-                 VALUES (%s, %s, %s, %s) ON CONFLICT (name) DO NOTHING;'''
-    
-    # Seed Training
-    train_sql = '''INSERT INTO anubhav_training (course_name, trainer, price, duration) 
-                   VALUES (%s, %s, %s, %s) ON CONFLICT (course_name) DO NOTHING;'''
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            # Batch Employee insert
-            for emp in employees:
-                cur.execute(emp_sql, (emp['name'], emp['gender'], emp['salary'], emp['currency']))
-            # Batch Training insert
-            for course, info in training_data.items():
-                cur.execute(train_sql, (course, info['trainer'], info['price'], info['hours']))
-    
-    print(f"📊 Data seeding complete.")
-
-# --- 4. MAIN ORCHESTRATOR ---
-
-if __name__ == "__main__":
-    # Sample Data
-    emp_list = [
-        {"name": "Fiona Gallagher", "gender": "Female", "salary": 78000, "currency": "EUR"},
-        {"name": "Jordan Lee", "gender": "Non-binary", "salary": 88000, "currency": "SGD"}
-    ]
-
-    training_dict = {
-        "Python Pro": {"trainer": "Anubhav", "price": 500, "hours": 40},
-        "Cloud Native": {"trainer": "Anubhav", "price": 750, "hours": 60}
-    }
-
-    try:
-        check_db_version()
-        setup_all_tables()
-        seed_data(emp_list, training_dict)
+        # Check connection
+        db.check_db_version()
+        
+        # Setup Table
+        training_ddl = '''
+        CREATE TABLE IF NOT EXISTS anubhav_training (
+            id SERIAL PRIMARY KEY,
+            course_name VARCHAR(50) UNIQUE,
+            trainer VARCHAR(100),
+            price INTEGER,
+            duration INTEGER
+        );'''
+        db.execute_ddl(training_ddl)
+        
+        # Seed Data
+        courses_data = {
+            "UI5" : {"trainer": "Anubhav", "hours": 40, "price": 380},
+            "CPI" : {"trainer": "Anurag", "hours": 35, "price": 400},
+            "AOH" : {"trainer": "Anubhav", "hours": 40, "price": 400},
+            "CDS" : {"trainer": "Ananya", "hours": 50, "price": 480},
+            "BTP" : {"trainer": "Saurabh", "hours": 30, "price": 580},
+            "SAC" : {"trainer": "Rohan", "hours": 45, "price": 300},
+            "CAPM" : {"trainer": "Sonia", "hours": 60, "price": 900},
+            "RAP" : {"trainer": "Anubhav", "hours": 40, "price": 850}
+        }
+        
+        # Insert using our modular seed logic
+        train_sql = '''INSERT INTO anubhav_training (course_name, trainer, price, duration) 
+                       VALUES (%s, %s, %s, %s) ON CONFLICT (course_name) DO NOTHING;'''
+        
+        with db.get_db_connection() as conn:
+            with conn.cursor() as cur:
+                for name, info in courses_data.items():
+                    cur.execute(train_sql, (name, info['trainer'], info['price'], info['hours']))
+        
+        return True
     except Exception as e:
-        print(f"❌ Workflow failed: {e}")
+        st.error(f"Database Init Failed: {e}")
+        return False
+
+# --- 3. HELPER FUNCTIONS ---
+def display_selected_courses():
+    if st.session_state.selected_courses:
+        for course in st.session_state.selected_courses:
+            # course index mapping: 0:id, 1:course_name, 2:trainer, 3:price, 4:duration
+            st.write(f"📖 **{course[1]}** | Trainer: {course[2]} | Price: ${course[3]} | {course[4]} hrs")
+    else:
+        st.info("Your cart is empty.")
+
+# Trigger Initialization
+app_ready = initialize_application()
+
+# --- 4. UI / FORM ---
+if app_ready:
+    with st.form("course_selection_form"):
+        st.subheader("Choose your favourite courses from Anubhav Trainings")
+        course_input = st.text_input("Enter module (e.g., UI5, BTP, RAP)", placeholder="Type here...")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            learn = st.form_submit_button("👍 Add to Cart")
+        with col2:
+            order = st.form_submit_button("🛒 Order Now")
+
+        if learn:
+            if course_input:
+                # Use modular query utility
+                query = "SELECT * FROM anubhav_training WHERE UPPER(course_name) = %s;"
+                data = db.execute_query(query, (course_input.upper(),))
+                
+                if data:
+                    st.session_state.selected_courses.append(data)
+                    st.success(f"✅ Added {data[1]} to your list!")
+                else:
+                    st.error("❌ Course not found. Please try again.")
+            else:
+                st.warning("Please enter a course name.")
+
+        if order:
+            if st.session_state.selected_courses:
+                st.subheader("Final Order Summary:")
+                display_selected_courses()
+                
+                # Generate PDF
+                invgen.generate_invoice(st.session_state.selected_courses, "invoice.pdf")
+                st.balloons()
+                st.success("🛒 Invoice generated! Your order is placed.")
+            else:
+                st.error("❌ Your cart is empty!")
+
+# --- 5. FOOTER / VISUALS ---
+st.divider()
+st.caption("Powered by Anubhav Trainings Modular DB Engine")
