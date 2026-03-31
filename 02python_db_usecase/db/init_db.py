@@ -3,17 +3,20 @@ import os
 from contextlib import contextmanager
 from dotenv import load_dotenv
 
-load_dotenv()
+# --- 1. INFRASTRUCTURE & CONFIGURATION ---
 
-# --- DATABASE UTILITIES ---
+def get_db_url():
+    """Loads and returns the DB_URL from environment variables."""
+    load_dotenv()
+    db_url = os.getenv("DB_URL")
+    if not db_url:
+        raise ValueError("❌ DB_URL not found in environment variables.")
+    return db_url
 
 @contextmanager
 def get_db_connection():
-    """Context manager to handle database connection and cleanup."""
-    db_url = os.getenv("DB_URL")
-    if not db_url:
-        raise ValueError("DB_URL not found in environment variables.")
-    
+    """Context manager to handle database connection, commits, and cleanup."""
+    db_url = get_db_url()
     conn = psycopg2.connect(db_url)
     try:
         yield conn
@@ -24,29 +27,39 @@ def get_db_connection():
     finally:
         conn.close()
 
-def execute_query(query, params=None, fetch=False):
-    """Generic function to execute any query."""
+# --- 2. GENERIC DATABASE UTILITIES ---
+
+def execute_ddl(query):
+    """Executes Data Definition Language (Table creation, etc.)."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(query, params)
-            if fetch:
-                return cur.fetchone()
-            return None
+            cur.execute(query)
 
-# --- BUSINESS LOGIC ---
+def execute_dml(query, params=None):
+    """Executes Data Manipulation Language (Insert, Update, Delete)."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params or ())
+
+def execute_query(query, params=None, fetch_all=False):
+    """Executes a query and returns one or all results."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params or ())
+            return cur.fetchall() if fetch_all else cur.fetchone()
+
+# --- 3. SPECIFIC BUSINESS LOGIC ---
 
 def check_db_version():
-    """Prints the PostgreSQL version."""
-    try:
-        row = execute_query('SELECT VERSION();', fetch=True)
-        if row:
-            print(f"Connected to: {row[0]}")
-    except Exception as e:
-        print(f"Version check failed: {e}")
+    """Logs the PostgreSQL version."""
+    version = execute_query('SELECT VERSION();')
+    if version:
+        print(f"✅ Connected to: {version[0]}")
 
-def initialize_schema():
-    """Creates the necessary tables."""
-    ddl_query = '''
+def setup_all_tables():
+    """Initializes schema for both Employee and Training tables."""
+    # Employee Table
+    employee_ddl = '''
     CREATE TABLE IF NOT EXISTS employees (
         id SERIAL PRIMARY KEY,
         name VARCHAR(50) UNIQUE,
@@ -54,36 +67,59 @@ def initialize_schema():
         salary DECIMAL(10,2),
         currency VARCHAR(4)
     );'''
-    execute_query(ddl_query)
-    print("Schema initialized.")
+    
+    # Training Table
+    training_ddl = '''
+    CREATE TABLE IF NOT EXISTS anubhav_training (
+        id SERIAL PRIMARY KEY,
+        course_name VARCHAR(50) UNIQUE,
+        trainer VARCHAR(100),
+        price INTEGER,
+        duration INTEGER
+    );'''
+    
+    execute_ddl(employee_ddl)
+    execute_ddl(training_ddl)
+    print("🚀 All tables initialized.")
 
-def seed_employees(employee_list):
-    """Inserts a list of employee dictionaries into the database."""
-    insert_sql = '''
-        INSERT INTO employees (name, gender, salary, currency)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (name) DO NOTHING;
-    '''
+def seed_data(employees, training_data):
+    """Populates both tables using UPSERT logic."""
+    # Seed Employees
+    emp_sql = '''INSERT INTO employees (name, gender, salary, currency) 
+                 VALUES (%s, %s, %s, %s) ON CONFLICT (name) DO NOTHING;'''
+    
+    # Seed Training
+    train_sql = '''INSERT INTO anubhav_training (course_name, trainer, price, duration) 
+                   VALUES (%s, %s, %s, %s) ON CONFLICT (course_name) DO NOTHING;'''
+
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            for emp in employee_list:
-                cur.execute(insert_sql, (emp['name'], emp['gender'], emp['salary'], emp['currency']))
-    print(f"Successfully processed {len(employee_list)} records.")
+            # Batch Employee insert
+            for emp in employees:
+                cur.execute(emp_sql, (emp['name'], emp['gender'], emp['salary'], emp['currency']))
+            # Batch Training insert
+            for course, info in training_data.items():
+                cur.execute(train_sql, (course, info['trainer'], info['price'], info['hours']))
+    
+    print(f"📊 Data seeding complete.")
 
-# --- MAIN EXECUTION ---
+# --- 4. MAIN ORCHESTRATOR ---
 
 if __name__ == "__main__":
-    additional_employees = [
-    {"name": "Fiona Gallagher", "gender": "Female", "salary": 78000, "currency": "EUR"},
-    {"name": "George Miller", "gender": "Male", "salary": 92000, "currency": "AUD"},
-    {"name": "Hana Sato", "gender": "Female", "salary": 12500000, "currency": "JPY"},
-    {"name": "Ian Wright", "gender": "Male", "salary": 55000, "currency": "GBP"},
-    {"name": "Jordan Lee", "gender": "Non-binary", "salary": 88000, "currency": "SGD"}
+    # Sample Data
+    emp_list = [
+        {"name": "Fiona Gallagher", "gender": "Female", "salary": 78000, "currency": "EUR"},
+        {"name": "Jordan Lee", "gender": "Non-binary", "salary": 88000, "currency": "SGD"}
     ]
+
+    training_dict = {
+        "Python Pro": {"trainer": "Anubhav", "price": 500, "hours": 40},
+        "Cloud Native": {"trainer": "Anubhav", "price": 750, "hours": 60}
+    }
 
     try:
         check_db_version()
-        initialize_schema()
-        seed_employees(additional_employees)
+        setup_all_tables()
+        seed_data(emp_list, training_dict)
     except Exception as e:
-        print(f"Workflow failed: {e}")
+        print(f"❌ Workflow failed: {e}")
